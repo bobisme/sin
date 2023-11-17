@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+catppuccin-egui = { git = "https://github.com/catppuccin/egui/", rev = "f2bcf74" }
 color-eyre = "0.6.2"
 const_soft_float = { version = "0.1.4", features = [] }
 cpal = { version = "0.15.2", features = [] }
@@ -14,8 +15,20 @@ dasp = { version = "0.11.0", features = [
   "signal",
   "envelope",
   "envelope-peak",
+  "ring_buffer",
   "signal-envelope",
 ] }
-rodio = "0.17.1"
+eframe = "0.23"
+egui = "0.23"
+egui_extras = { version = "0.23", features = ["all_loaders"] }
+itertools = "0.11.0"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+plotters = "0.3"
+png = "0.17.10"
+ringbuffer-spsc = "0.1.9"
 tracing = "0.1.39"
-tracing-subscriber = "0.3.17"
+tracing-subscriber = { version = "0.3.17", features = [
+  "env-filter",
+  "json",
+  "parking_lot",
+] }
