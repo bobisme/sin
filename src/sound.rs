@@ -2,22 +2,14 @@ use color_eyre::Result;
 use const_soft_float::soft_f64::SoftF64;
 use cpal::{
     traits::{DeviceTrait, StreamTrait},
-    Device, Sample, StreamConfig, SupportedStreamConfig,
+    Device, Sample, StreamConfig,
 };
 use dasp::Frame;
-use dasp_graph::{BoxedNode, BoxedNodeSend, Buffer, Node, NodeData};
-use dasp_signal::{self, Signal};
+use dasp_graph::{BoxedNode, Buffer, Node, NodeData};
+use dasp_signal::Signal;
 // use dasp::signal::envelope::SignalEnvelope;
-use parking_lot::Mutex;
-use ringbuf::{Consumer, HeapConsumer, HeapProducer, HeapRb, Producer};
-use std::{
-    fmt::Debug,
-    marker::PhantomData,
-    sync::{
-        mpsc::{self, Receiver, SyncSender},
-        Arc,
-    },
-};
+use ringbuf::{HeapConsumer, HeapProducer};
+use std::{fmt::Debug, marker::PhantomData};
 
 use crate::logging::prelude::*;
 
@@ -60,83 +52,7 @@ pub const MAX_EDGES: usize = 1024;
 pub type Graph = petgraph::Graph<NodeData<BoxedNode>, (), petgraph::Directed, u32>;
 pub type Processor = dasp_graph::Processor<Graph>;
 
-fn write_data<T>(
-    output: &mut [T],
-    channels: usize,
-    complete_tx: &mpsc::SyncSender<()>,
-    signal: impl Iterator<Item = f32>,
-) where
-    T: cpal::Sample + cpal::FromSample<f32>,
-{
-    let mut i = signal.into_iter();
-    for frame in output.chunks_mut(channels) {
-        let sample = match i.next() {
-            None => {
-                complete_tx.try_send(()).ok();
-                0.0
-            }
-            Some(sample) => sample,
-        };
-        // let value: T = cpal::Sample::from::<f32>(&sample);
-        let value: T = sample.to_sample();
-        for sample in frame {
-            *sample = value;
-        }
-    }
-}
-
-fn write_chan<T>(
-    output: &mut [T],
-    channels: usize,
-    complete_tx: &mpsc::SyncSender<()>,
-    chan: std::sync::mpsc::Receiver<T>,
-) where
-    T: cpal::Sample + cpal::FromSample<f32> + Default,
-{
-    for frame in output.chunks_mut(channels) {
-        let sample = match chan.try_recv() {
-            Ok(sample) => sample,
-            Err(_) => {
-                complete_tx.try_send(()).ok();
-                Default::default()
-            }
-        };
-        // let value: T = cpal::Sample::from::<f32>(&sample);
-        let value: T = sample.to_sample();
-        for sample in frame {
-            *sample = value;
-        }
-    }
-}
-
-fn write_signal<S, F>(
-    output: &mut [F],
-    channels: usize,
-    complete_tx: &mpsc::SyncSender<()>,
-    signal: &mut S,
-) where
-    // F: cpal::Sample + cpal::FromSample<f32> + Default,
-    S: Signal<Frame = F>,
-    F: dasp::Frame + Default,
-{
-    for out_frame in output.chunks_mut(channels) {
-        // let frame = signal.next();
-        let frame = match signal.is_exhausted() {
-            true => {
-                complete_tx.try_send(()).ok();
-                Default::default()
-            }
-            false => signal.next(),
-        };
-        // let value: T = cpal::Sample::from::<f32>(&sample);
-        out_frame.iter_mut().for_each(|out| {
-            *out = frame;
-        });
-    }
-}
-
 pub fn sig<S>(sample_rate: u32) -> dasp_signal::FromIterator<impl Iterator<Item = f32>>
-// pub fn sig<S, F>(config: &cpal::StreamConfig) -> Box<(dyn Signal<Frame = F> + Send + 'static)>
 where
     S: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
 {
@@ -169,7 +85,6 @@ where
 }
 
 pub struct SigNode<Sam, Sig> {
-    sample_rate: u32,
     signal: Sig,
     _mark: PhantomData<Sam>,
 }
@@ -179,9 +94,8 @@ where
     Sam: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
     Sig: Signal<Frame = f32>,
 {
-    pub fn new(sample_rate: u32, signal: Sig) -> Self {
+    pub fn new(signal: Sig) -> Self {
         Self {
-            sample_rate,
             signal,
             _mark: PhantomData,
         }
@@ -224,7 +138,7 @@ where
     F: cpal::SizedSample + cpal::FromSample<f32> + Default + Debug,
 {
     // A channel for indicating when playback has completed.
-    let (complete_tx, complete_rx) = mpsc::sync_channel(1);
+    let (complete_tx, complete_rx) = std::sync::mpsc::sync_channel(1);
 
     // Create and run the stream.
     let err_fn = |err| eprintln!("an error occurred on stream: {}", err);
@@ -258,206 +172,82 @@ where
     Ok(())
 }
 
-pub struct Player {
-    // TODO: make lock-free
-
-    // pub ring_buf: Arc<RwLock<dasp::ring_buffer::Fixed<[f32; 4096]>>>,
-    config: SupportedStreamConfig,
+pub struct RingWriteNode {
+    prod: HeapProducer<f32>,
+    pass: dasp_graph::node::Pass,
 }
 
-// impl Player {
-//     pub fn new(device: Device, config: SupportedStreamConfig) -> Self {
-//         // let rbuf = dasp::ring_buffer::Fixed::from([0f32; 4096]);
-//         let x = Self {
-//             // ring_buf: Arc::new(RwLock::new([0f32; 4096].into())),
-//             config,
-//         };
-//         // let arc_buf = Arc::clone(&x.ring_buf);
-//         std::thread::spawn(move || Self::run(device, arc_buf));
-//         x
-//     }
-//
-//     pub fn run(device: Device, ring_buf: Arc<RwLock<dasp::ring_buffer::Fixed<[f32; 4096]>>>) {
-//         info!("Player::run");
-//         let config = match device.default_output_config() {
-//             Ok(config) => StreamConfig::from(config),
-//             Err(err) => {
-//                 error!(?err, "could not get ouput config");
-//                 return;
-//             }
-//         };
-//         let channels = config.channels as usize;
-//         let (complete_tx, complete_rx) = mpsc::sync_channel(1);
-//         // let rb = Arc::clone(&ring_buf);
-//         let stream = device.build_output_stream(
-//             &config,
-//             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-//                 info!("play loop started");
-//                 loop {
-//                     // sync
-//                     let rb = ring_buf.read_arc();
-//                     let mut i = rb.iter();
-//                     for ouput_frame in output.chunks_mut(channels) {
-//                         let Some(sample) = i.next() else {
-//                             break;
-//                         };
-//                         debug!(sample, "got sample");
-//                         for out_sample in ouput_frame {
-//                             *out_sample = sample.to_sample();
-//                         }
-//                     }
-//                     // std::thread::yield_now();
-//                 }
-//                 complete_tx.send(()).unwrap();
-//             },
-//             |err| eprintln!("an error occurred on stream: {}", err),
-//             None,
-//         );
-//         let Ok(stream) = stream else {
-//             error!(err = ?stream.err(), "could not build output stream");
-//             return;
-//         };
-//         info!("playing stream");
-//         if let Err(err) = stream.play() {
-//             error!(?err, "could not play stream");
-//         }
-//         // Wait for playback to complete.
-//         complete_rx.recv().unwrap();
-//         if let Err(err) = stream.pause() {
-//             error!(?err, "could not pause stream");
-//         }
-//         info!("Player::run ended");
-//     }
-//
-//     pub fn sample_rate(&self) -> u32 {
-//         self.config.sample_rate().0
-//     }
-//
-//     pub fn play(&mut self) {
-//         let sample_rate = self.sample_rate();
-//         let t = sample_rate as usize * 2;
-//         let s = sig::<f32>(&self.config.clone().into());
-//         // let v: Vec<_> = s.take(t).collect();
-//         // let attack = f32::max(1.0, t as f32 / 1000.0);
-//         // let detector = dasp::envelope::Detector::peak(attack, attack);
-//         // let mut fork = s.fork(ring);
-//         // let (a, b) = fork.by_ref();
-//         // let env = signal::from_iter(v.iter().copied()).detect_envelope(detector);
-//         debug!("writing to ring buffer");
-//         {
-//             let mut buf = self.ring_buf.write_arc();
-//             s.take(t).for_each(|f| {
-//                 buf.push(f);
-//             });
-//             debug!("wrote");
-//         }
-//         // if let Some(buf) = Arc::get_mut(&mut self.ring_buf) {
-//         //     env.take(t).for_each(|f| {
-//         //         buf.push(f);
-//         //     });
-//         // } else {
-//         //     debug!("could not write");
-//         // }
-//
-//         // let config = self.config.clone();
-//         // let s: Vec<_> = v.iter().map(|x| x * 0.3).take(t).collect();
-//     }
-// }
-
-pub struct PlayerNode<Samp> {
-    // device: Device,
-    // config: StreamConfig,
-    // rb: HeapRb<f32>,
-    rb_send: HeapProducer<f32>,
-    // rb_send: Producer<f32, &'rb HeapRb<f32>>,
-    // rbuf: dasp_ring_buffer::Bounded<Vec<f32>>,
-    // rbuf: ringbuffer_spsc::RingBuffer<f32, 1024>,
-    // stream: Arc<Mutex<cpal::Stream>>,
-    stream: <Device as DeviceTrait>::Stream,
-    sync_recv: Receiver<()>,
-    _mark: PhantomData<Samp>,
+impl Debug for RingWriteNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RingWriteNode")
+            .field("prod", &"...producer...")
+            .finish()
+    }
 }
 
-impl<Samp> PlayerNode<Samp>
-where
-    Samp: cpal::SizedSample + cpal::FromSample<f32> + Default + Debug + Send,
-{
-    pub fn new(device: Device, config: StreamConfig) -> Self {
-        // let rbuf = dasp_ring_buffer::Bounded::from(vec![0f32; 4096]);
-        let rb = HeapRb::new(16384);
-        // let (mut send, mut recv) = rb.split_ref();
-        let (send, recv) = rb.split();
-        let (sync_send, sync_recv) = mpsc::sync_channel(1);
-        let stream = Self::build_stream(device, config, recv, sync_send);
-        // stream.play().unwrap();
+impl RingWriteNode {
+    pub fn new(prod: HeapProducer<f32>) -> Self {
         Self {
-            // device,
-            // config,
-            // rb,
-            rb_send: send,
-            // rbuf,
-            stream,
-            sync_recv,
-            _mark: PhantomData,
+            prod,
+            pass: dasp_graph::node::Pass,
         }
     }
-
-    pub fn build_stream(
-        device: Device,
-        config: StreamConfig,
-        mut cons: HeapConsumer<f32>,
-        sync_send: SyncSender<()>,
-    ) -> cpal::Stream {
-        let err_fn = |err| eprintln!("an error occurred on stream: {}", err);
-        let channels = config.channels as usize;
-        let callback = move |device_out: &mut [Samp], _: &cpal::OutputCallbackInfo| {
-            // loop {
-            debug!("inside callback");
-            if cons.is_empty() {
-                return;
-            }
-            let mut iter = cons.pop_iter();
-            for out_frame in device_out.chunks_mut(channels) {
-                let in_sample = match iter.next() {
-                    Some(sample) => sample.to_sample(),
-                    None => break,
-                };
-                for out_sample in out_frame.iter_mut() {
-                    *out_sample = in_sample;
-                }
-                debug!(s = ?in_sample, "PlayerNode callback: put sample");
-            }
-            debug!("leaving callback");
-        };
-        device
-            .build_output_stream(&config, callback, err_fn, None)
-            .unwrap()
-    }
 }
 
-impl<Samp> Node for PlayerNode<Samp>
-where
-    Samp: cpal::SizedSample + cpal::FromSample<f32> + Default + Debug,
-{
-    fn process(&mut self, inputs: &[dasp_graph::Input], output: &mut [dasp_graph::Buffer]) {
-        debug!("PlayerNode::process");
+impl Node for RingWriteNode {
+    #[tracing::instrument]
+    fn process(&mut self, inputs: &[dasp_graph::Input], output: &mut [Buffer]) {
         let Some(input) = inputs.get(0) else {
-            warn!("no inputs");
+            error!("no inputs");
             return;
         };
         let in_buffers = input.buffers();
         let Some(in_buf) = in_buffers.get(0) else {
-            warn!("no buffer");
+            error!("no input buffer");
             return;
         };
         for sample in in_buf.iter() {
-            while self.rb_send.is_full() {
+            while self.prod.is_full() {
                 core::hint::spin_loop();
             }
-            if let Err(val) = self.rb_send.push(*sample) {
-                warn!(sample = val, "PlayerNode: ring buffer full");
+            if let Err(val) = self.prod.push(*sample) {
+                warn!(sample = val, "RingWriteNode: ring buffer full");
             };
         }
-        debug!("PlayerNode::process END");
+        self.pass.process(inputs, output)
     }
+}
+
+pub fn player_stream<Samp>(
+    device: Device,
+    config: StreamConfig,
+    mut cons: HeapConsumer<f32>,
+) -> cpal::Stream
+where
+    Samp: cpal::SizedSample + cpal::FromSample<f32> + Default + Debug + Send,
+{
+    let err_fn = |err| eprintln!("an error occurred on stream: {}", err);
+    let channels = config.channels as usize;
+    let callback = move |device_out: &mut [Samp], _: &cpal::OutputCallbackInfo| {
+        // loop {
+        debug!("inside callback");
+        if cons.is_empty() {
+            return;
+        }
+        let mut iter = cons.pop_iter();
+        for out_frame in device_out.chunks_mut(channels) {
+            let in_sample = match iter.next() {
+                Some(sample) => sample.to_sample(),
+                None => break,
+            };
+            for out_sample in out_frame.iter_mut() {
+                *out_sample = in_sample;
+            }
+            debug!(s = ?in_sample, "PlayerNode callback: put sample");
+        }
+        debug!("leaving callback");
+    };
+    device
+        .build_output_stream(&config, callback, err_fn, None)
+        .unwrap()
 }
