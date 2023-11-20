@@ -10,22 +10,22 @@ catppuccin-egui = { git = "https://github.com/catppuccin/egui/", rev = "f2bcf74"
 color-eyre = "0.6.2"
 const_soft_float = { version = "0.1.4", features = [] }
 cpal = { version = "0.15.2", features = [] }
-dasp = { version = "0.11.0", features = [
-  "peak",
-  "signal",
-  "envelope",
-  "envelope-peak",
-  "ring_buffer",
-  "signal-envelope",
-] }
+dasp = { version = "0.11.0", features = ["peak"] }
+dasp_envelope = { version = "0.11.0", features = ["peak"] }
+dasp_graph = "0.11.0"
+dasp_ring_buffer = "0.11.0" # rm
+dasp_signal = { version = "0.11.0", features = ["bus", "envelope"] }
+dasp_slice = "0.11.0"
 eframe = "0.23"
 egui = "0.23"
 egui_extras = { version = "0.23", features = ["all_loaders"] }
-itertools = "0.11.0"
+itertools = "0.12.0"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
+petgraph = { version = "0.5", features = ["stable_graph"] }
 plotters = "0.3"
 png = "0.17.10"
-ringbuffer-spsc = "0.1.9"
+ringbuffer-spsc = "0.1.9" # rm
+ringbuf = "0.3"
 tracing = "0.1.39"
 tracing-subscriber = { version = "0.3.17", features = [
   "env-filter",
